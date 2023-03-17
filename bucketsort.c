@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <mpi.h>
 
 struct Bucket {
@@ -54,48 +55,41 @@ void bucketsort_parallel(const float* floatArrayToSort, int size, int bucketCoun
         start = (portion+1)*remainder + portion*(rank-remainder);
     }
 
-
-//    if (rank) { // Rank 0 keeps full buckets array to later gather from all
-        /* Allocate memory for respective portion of buckets */
-        struct Bucket *uniqueBuckets;
-        uniqueBuckets = (struct Bucket *) malloc((size_t) portion * sizeof(struct Bucket));
-        if (uniqueBuckets == NULL) {
-            MPI_Abort(MPI_COMM_WORLD, -1);
-            return;
+    if (rank) { // Rank 0 keeps original array for to have space for final gather
+        size_t newSize = portion * sizeof(struct Bucket);
+        memcpy(buckets, buckets + start, newSize);
+        buckets = (struct Bucket *) realloc(buckets, newSize);
+    }
+    /* Gather items in each bucket and store in a separate array */
+    int itemsInBucket;
+    struct Bucket* currentBucket;
+    for (int i = 0; i < portion; i++) {
+        currentBucket = &buckets[i];
+        itemsInBucket = currentBucket->count;
+        float numbers[itemsInBucket];
+        for (int j = 0; j < itemsInBucket; j++) {
+            numbers[j] = currentBucket->value;
+            currentBucket = currentBucket->next;
         }
-
-        /* Copy the portion of buckets on to the newly assigned memory space */
-        for (int i = 0; i < portion; i++) {
-            uniqueBuckets[i] = buckets[i + start];
+        mergeSort(numbers, 0, itemsInBucket-1);
+        currentBucket = &buckets[i];
+        for (int j = 0; j < itemsInBucket; j++) {
+            currentBucket->value = numbers[j];
+            currentBucket = currentBucket->next;
         }
-        free(buckets);
-
-        /* Gather items in each bucket and store in a separate array */
-        int itemsInBucket;
-        struct Bucket* currentBucket;
-        for (int i = 0; i < portion; i++) {
-            currentBucket = &uniqueBuckets[i];
-            itemsInBucket = currentBucket->count;
-            float numbers[itemsInBucket];
-            for (int j = 0; j < itemsInBucket; j++) {
-                numbers[j] = currentBucket->value;
-                currentBucket = currentBucket->next;
-            }
-            mergeSort(numbers, 0, itemsInBucket-1);
-            currentBucket = &uniqueBuckets[i];
-            for (int j = 0; j < itemsInBucket; j++) {
-                currentBucket->value = numbers[j];
-                currentBucket = currentBucket->next;
-            }
-        }
-        printBuckets(uniqueBuckets, portion);
-//    }
+    }
+    printBuckets(buckets, portion);
     /*
      * Create new communicators for each bucket.
      * This allows multiple processors to be run on each.
      * Hence, allowing mergesort to be done in parallel on each bucket.
      * The new communicators allow processor ranks to be local.
      * This allows for rank based parallelism.
+     *
+     * Add a "round" parameter to mergesort function
+     * divide work across processors by checking if their rank is below or .--
+     * -.. =above 2 to the power of "round", until there is 1 processor left
+     * have the above only be done if there is 1.5x processors the number of buckets
      */
 }
 
@@ -201,6 +195,7 @@ int main(int argc, char** argv) {
         array[i] = (float) i / 10;
     }
     array[1] = 0.21; array[2] = 0.2;
+    array[13] = 1.4; array[14] = 1.3;
     bucketsort(array, size);
     MPI_Finalize();
     free(array);
