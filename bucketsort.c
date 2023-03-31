@@ -13,7 +13,8 @@ struct Bucket {
 
 int bucketsort_parallel(float* floatArrayToSort, int size,
                          int bucketCount, int itemsPerProcessor);
-void getDistributions(int *start, int *portion, int remainder, int rank);
+void getDistributions(int *start, int *portion, int *remainder, int size,
+                      int processorCount, int rank);
 void initialiseBuckets(struct Bucket* buckets, int bucketCount);
 int fillBuckets(const float* floatArrayToSort, int size,
                  struct Bucket* buckets, int bucketCount);
@@ -68,10 +69,9 @@ int bucketsort_parallel(float* floatArrayToSort, int size,
 
     int portion, remainder, start, groupRank;
     groupRank = rank % bucketCount;
-    portion = bucketCount / processorCount;
-    remainder = bucketCount % processorCount;
 
-    getDistributions(&start, &portion, remainder, groupRank);
+    getDistributions(&start, &portion, &remainder, bucketCount,
+                     processorCount, groupRank);
 
     initialiseBuckets(buckets, bucketCount);
     // negative numbers in list or failure to malloc
@@ -199,13 +199,16 @@ int bucketsort_parallel(float* floatArrayToSort, int size,
      */
 }
 
-void getDistributions(int *start, int *portion, int remainder, int rank) {
-    if (rank < remainder) { // Spread remainder evenly across processors
+void getDistributions(int *start, int *portion, int *remainder, int size,
+                      int processorCount, int rank) {
+    *portion = size / processorCount;
+    *remainder = size % processorCount;
+    if (rank < *remainder) { // Spread remainder evenly across processors
         (*portion)++; // Processors get a max 1 remainder bucket to deal with
         *start = (*portion)*rank; // All processors before have had remainder buckets
     }
     else {
-        *start = ((*portion)+1)*remainder + (*portion)*(rank-remainder);
+        *start = ((*portion)+1)*(*remainder) + (*portion)*(rank-(*remainder));
     }
 }
 
@@ -279,14 +282,7 @@ void mergesort_parallel(float* floatArrayToSort, int size, MPI_Comm communicator
         return;
     }
 
-    portion = size / processorCount;
-    remainder = size % processorCount;
-    getDistributions(&start, &portion, remainder, rank);
-
-    int someRank;
-    MPI_Comm_rank(MPI_COMM_WORLD, &someRank);
-
-    printf("Rank: %d, portion: %d, start: %d\n", someRank, portion, start);
+    getDistributions(&start, &portion, &remainder, size, processorCount, rank);
 
 
     float sortedArray[portion];
