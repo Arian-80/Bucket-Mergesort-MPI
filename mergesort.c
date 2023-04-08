@@ -1,5 +1,4 @@
 #include <stdio.h>
-#include <stdlib.h>
 
 void merge(int* intArrayToSort, int low, int mid, int high);
 
