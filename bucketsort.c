@@ -11,6 +11,10 @@ struct Bucket {
     int count;
 };
 
+/*
+ * The majority of the sequential code in this project is replicated across..-
+ * -.. all versions of this algorithm - MPI, Pthreads and OpenMP.
+ */
 int bucketsort_parallel(float* floatArrayToSort, int size,
                          int bucketCount, int itemsPerProcessor);
 void getDistributions(int *start, int *portion, int *remainder, int size,
@@ -27,27 +31,31 @@ void makeGathervCall(void* recvbuf, int rank, int processorCount, int portion,
 
 
 int bucketsort(float* floatArrayToSort, int size, int itemsPerProcessor) {
-    return bucketsort_parallel(floatArrayToSort, size, 10, itemsPerProcessor);
+    return bucketsort_parallel(floatArrayToSort, size, 3, itemsPerProcessor);
 }
 
 int bucketsort_parallel(float* floatArrayToSort, int size,
                          int bucketCount, int itemsPerProcessor) {
     /*
-     * floatArrayToSort: array to sort, self-descriptive
-     * size: size of the array to sort
-     * bucketCount: number of buckets
-     * itemsPerProcessor: {bucketCount} additional processors allowed for every ..-
-     * -.. extra {itemsPerProcessor} items in a bucket to allow parallel mergesort
+     * @param floatArrayToSort  Array to sort, self-descriptive
+     * @param size              Size of the array to sort
+     * @param bucketCount       Number of buckets
+     * @param itemsPerProcessor {bucketCount} additional processors allowed for every ..-
+     *                          -.. extra {itemsPerProcessor} items in every bucket ..-
+     *                          -.. to allow parallel mergesort.
      */
     if (bucketCount < 1) return 0;
-    else if (bucketCount == 1) {
-        mergesort(floatArrayToSort, 0, size-1);
+
+    int rank;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+
+    if (bucketCount == 1) {
+        mergesort_parallel(floatArrayToSort, size, MPI_COMM_WORLD);
+        return rank == 0;
     }
     int processorCount;
     MPI_Comm_size(MPI_COMM_WORLD, &processorCount);
 
-    int rank;
-    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
 
     // Ensure max 1 extra processor for each itemsPerProcessor in each bucket
 //    WORK ON THE EQUATION BELOW. ALSO BUCKETCOUNT IS 1. IT SHOULD BE 2 OR 10 TO TEST.
@@ -76,7 +84,6 @@ int bucketsort_parallel(float* floatArrayToSort, int size,
     initialiseBuckets(buckets, bucketCount);
     // negative numbers in list or failure to malloc
     if (!fillBuckets(floatArrayToSort, size, buckets, bucketCount)) {
-        free(buckets);
         return 0;
     }
     /* testing if buckets have been initialised correctly
@@ -284,18 +291,18 @@ void mergesort_parallel(float* floatArrayToSort, int size, MPI_Comm communicator
 
     getDistributions(&start, &portion, &remainder, size, processorCount, rank);
 
-
     float sortedArray[portion];
     memcpy(sortedArray, floatArrayToSort+start, portion*sizeof(float));
-    mergesort(sortedArray, 0, portion);
+    mergesort(sortedArray, 0, portion-1);
+    // POTENTIALLY REPLACE BELOW WITH MAKEGATHERVCALL() CALL
     if (!rank) { // Only rank 0 manages the global communications
         // Compute counts and displacements for MPI_Gatherv.
         int recvcounts[processorCount];
         int gatherDispls[processorCount]; // Displacement for MPI_Gatherv
         // rank 0 always accounts for remainder
-        int valuesWithRemainder = portion * size;
+        int valuesWithRemainder = portion;
         int valuesWithoutRemainder = remainder ?
-                (portion-1)*size : valuesWithRemainder;
+                (portion-1) : valuesWithRemainder;
 
         int currGatherDispls = 0; // Start at 0
         // Processes dealing with remainders have additional counts and displs
@@ -309,19 +316,28 @@ void mergesort_parallel(float* floatArrayToSort, int size, MPI_Comm communicator
             recvcounts[i] = valuesWithoutRemainder;
             currGatherDispls += valuesWithoutRemainder;
         }
-        MPI_Gatherv(MPI_IN_PLACE, portion, MPI_FLOAT, floatArrayToSort,
+        MPI_Gatherv(sortedArray, portion, MPI_FLOAT, floatArrayToSort,
                     recvcounts, gatherDispls, MPI_FLOAT, 0, communicator);
+        /* Final merges */
+        int low, mid, high, temp;
+        low = 0;
+        high = recvcounts[0]-1;
+        for (int i = 0; i < processorCount-1; i++) {
+            temp = recvcounts[i+1]-1 + gatherDispls[i+1];
+            mid = high;
+            high = temp;
+            merge(floatArrayToSort, low, mid, high);
+        }
     }
     else {
-        MPI_Gatherv(floatArrayToSort, portion, MPI_FLOAT, NULL,
+        MPI_Gatherv(sortedArray, portion, MPI_FLOAT, NULL,
                     NULL, NULL, MPI_FLOAT, 0, communicator);
     }
-    // mergesort(floatArrayToSort, 0, size-1);
+//     mergesort(floatArrayToSort, 0, size-1);
 }
-
 void mergesort(float* array, int low, int high) {
     if (low >= high) return;
-    int mid = low + (high - low)/2;
+    int mid = low + (high - low)/2; // 0 2     0 + (2 - 0)/2 = 1   0 1 2
     mergesort(array, low, mid); // low -> mid inclusive
     mergesort(array, mid + 1, high);
     merge(array, low, mid, high);
@@ -364,14 +380,15 @@ void merge(float* floatArrayToSort, int low, int mid, int high) {
 
 void makeGathervCall(void* recvbuf, int rank, int processorCount, int portion,
                      int remainder, int size, MPI_Comm communicator) {
+    // LITERALLY NOT USED.
     if (!rank) { // Only rank 0 manages the global communications
         // Compute counts and displacements for MPI_Gatherv.
         int recvcounts[processorCount];
         int gatherDispls[processorCount]; // Displacement for MPI_Gatherv
         // rank 0 always accounts for remainder
-        int valuesWithRemainder = portion * size;
+        int valuesWithRemainder = portion;
         int valuesWithoutRemainder = remainder ?
-                                     (portion-1)*size : valuesWithRemainder;
+                                     portion-1 : valuesWithRemainder;
 
         int currGatherDispls = 0; // Start at 0
         // Processes dealing with remainders have additional counts and displs
@@ -412,18 +429,9 @@ int main(int argc, char** argv) {
     for (int i = 0; i < size; i++) {
         array[i] = (float) rand() / (float) RAND_MAX;
     }
-    int incorrectCounter, correctCounter;
-    incorrectCounter = correctCounter = 0;
-    for (int i = 1; i < size; i++) {
-        if (array[i] < array[i-1]) incorrectCounter++;
-        else correctCounter++;
-    }
-    correctCounter++; // final unaccounted number
-//    printf("Initially Sorted numbers: %d\nInitially unsorted numbers: %d\n"
-//           "Total numbers: %d\n", correctCounter, incorrectCounter, size);
     double start, end;
     start = MPI_Wtime();
-    if (!bucketsort(array, size, 8)) { // not manager processor results
+    if (!bucketsort(array, size, 8)) { // not main processor results
         MPI_Finalize();
         free(array);
         return 0;
@@ -431,6 +439,7 @@ int main(int argc, char** argv) {
     end = MPI_Wtime();
     printf("Time taken: %f\n", end-start);
     MPI_Finalize();
+    int incorrectCounter, correctCounter;
     incorrectCounter = correctCounter = 0;
     for (int i = 1; i < size; i++) {
         if (array[i] < array[i-1]) incorrectCounter++;
