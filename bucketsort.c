@@ -31,7 +31,7 @@ void makeGathervCall(void* recvbuf, int rank, int processorCount, int portion,
 
 
 int bucketsort(float* floatArrayToSort, int size, int itemsPerProcessor) {
-    return bucketsort_parallel(floatArrayToSort, size, 3, itemsPerProcessor);
+    return bucketsort_parallel(floatArrayToSort, size, 10000, itemsPerProcessor);
 }
 
 int bucketsort_parallel(float* floatArrayToSort, int size,
@@ -48,7 +48,6 @@ int bucketsort_parallel(float* floatArrayToSort, int size,
 
     int rank;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
-
     if (bucketCount == 1) {
         mergesort_parallel(floatArrayToSort, size, MPI_COMM_WORLD);
         return rank == 0;
@@ -82,6 +81,7 @@ int bucketsort_parallel(float* floatArrayToSort, int size,
                      processorCount, groupRank);
 
     initialiseBuckets(buckets, bucketCount);
+
     // negative numbers in list or failure to malloc
     if (!fillBuckets(floatArrayToSort, size, buckets, bucketCount)) {
         return 0;
@@ -106,7 +106,6 @@ int bucketsort_parallel(float* floatArrayToSort, int size,
      * }
      * return 0;
      */
-
     if (rank) { // Rank 0 keeps original array for to have space for final gather
         size_t newSize = portion * sizeof(struct Bucket);
         memcpy(buckets, buckets + start, newSize);
@@ -123,9 +122,8 @@ int bucketsort_parallel(float* floatArrayToSort, int size,
     int itemsInBucket;
     struct Bucket* currentBucket;
     struct Bucket* prevBucket;
-    float* numbersInBuckets[portion];
-    int sizes[portion]; // size of each bucket
-//    Maybe free buckets in the loop below instead as soon as the data is copied? like in line 98 and somewhere around 110?
+    float** numbersInBuckets = malloc(portion * sizeof(float*));
+    int* sizes = malloc(portion * sizeof(int)); // size of each bucket
     for (int i = 0; i < portion; i++) {
         currentBucket = &buckets[i];
         itemsInBucket = currentBucket->count;
@@ -154,7 +152,7 @@ int bucketsort_parallel(float* floatArrayToSort, int size,
             totalItems += sizes[i];
         }
     }
-    float sortedArray[totalItems];
+    float* sortedArray = malloc(totalItems * sizeof(float));
     /* Add all sorted numbers into the allocated array */
     if (rank < bucketCount) {
         int k = 0;
@@ -168,7 +166,7 @@ int bucketsort_parallel(float* floatArrayToSort, int size,
     for (int i = 0; i < portion; i++) {
         free(numbersInBuckets[i]);
     }
-
+    free(numbersInBuckets);
     /* Find recvcounts and displs for final Gatherv */
     if (!rank) {
         int recvcounts[processorCount], displs[processorCount];
@@ -190,6 +188,8 @@ int bucketsort_parallel(float* floatArrayToSort, int size,
         MPI_Gatherv(sortedArray, totalItems, MPI_FLOAT, NULL,
                     NULL, NULL, MPI_FLOAT, 0, MPI_COMM_WORLD);
     }
+    free(sortedArray);
+    free(sizes);
     /* testing - printing sorted array */
 //    if (!rank) {
 //        for (int i = 0; i < size; i++) {
@@ -244,7 +244,10 @@ void freeBuckets(struct Bucket* buckets, int bucketCount) {
 int fillBuckets(const float* floatArrayToSort, int size, struct Bucket* buckets, int bucketCount) {
     float currentItem;
     struct Bucket *bucket;
-    float bucketLimit = 0.1 * bucketCount;
+    int rank;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+
+    // Fill the buckets
     for (int i = 0; i < size; i++) {
         currentItem = floatArrayToSort[i];
         if (currentItem < 0) {
@@ -252,8 +255,9 @@ int fillBuckets(const float* floatArrayToSort, int size, struct Bucket* buckets,
             MPI_Abort(MPI_COMM_WORLD, EXIT_FAILURE);
             return 0; // No negative numbers allowed
         }
-        if (currentItem < bucketLimit) {
-            bucket = &(buckets[(int) (currentItem * 10)]);
+        // ASSUMES NUMBERS WILL BE FROM 0 TO 1. EXPLAIN IN DISS - OVERVIEW OF ALGORITHM. IF NUMBERS ABOVE 1, PERFORMANCE = BAD.
+        if (currentItem < 0.9) {
+            bucket = &(buckets[(int) (currentItem * (float) bucketCount)]); // 0.004, 0.00455, 0.15, 0.015
         } else { // If larger than limit, store in the final bucket
             bucket = &buckets[bucketCount-1];
         }
@@ -262,20 +266,18 @@ int fillBuckets(const float* floatArrayToSort, int size, struct Bucket* buckets,
             bucket->value = currentItem;
             continue;
         }
-        while (bucket->next != NULL) {
-            bucket = bucket->next;
-        }
-        struct Bucket *newBucket = (struct Bucket *)
-                malloc(sizeof(struct Bucket));
+
+        // Insert element at the start.
+        struct Bucket *newBucket = (struct Bucket *) malloc(sizeof(struct Bucket));
         if (newBucket == NULL) {
             freeBuckets(buckets, bucketCount);
             MPI_Abort(MPI_COMM_WORLD, EXIT_FAILURE);
             return 0;
         }
-        bucket->next = newBucket;
         newBucket->value = currentItem;
-        newBucket->next = NULL;
-        newBucket->count = 0;
+        newBucket->count = 1;
+        newBucket->next = bucket->next;
+        bucket->next = newBucket;
     }
     return 1;
 }
@@ -290,8 +292,7 @@ void mergesort_parallel(float* floatArrayToSort, int size, MPI_Comm communicator
     }
 
     getDistributions(&start, &portion, &remainder, size, processorCount, rank);
-
-    float sortedArray[portion];
+    float* sortedArray = malloc(portion * sizeof(float));
     memcpy(sortedArray, floatArrayToSort+start, portion*sizeof(float));
     mergesort(sortedArray, 0, portion-1);
     // POTENTIALLY REPLACE BELOW WITH MAKEGATHERVCALL() CALL
@@ -333,6 +334,7 @@ void mergesort_parallel(float* floatArrayToSort, int size, MPI_Comm communicator
         MPI_Gatherv(sortedArray, portion, MPI_FLOAT, NULL,
                     NULL, NULL, MPI_FLOAT, 0, communicator);
     }
+    free(sortedArray);
 //     mergesort(floatArrayToSort, 0, size-1);
 }
 void mergesort(float* array, int low, int high) {
@@ -347,7 +349,8 @@ void merge(float* floatArrayToSort, int low, int mid, int high) {
     int i, j, k;
     int lengthOfA = mid - low + 1; // low -> mid, inclusive
     int lengthOfB = high - mid;
-    float a[lengthOfA], b[lengthOfB];
+    float* a = malloc(lengthOfA * sizeof(float));
+    float* b = malloc(lengthOfB * sizeof(float));
     for (i = 0; i < lengthOfA; i++) {
         a[i] = floatArrayToSort[i + low];
     }
@@ -376,6 +379,7 @@ void merge(float* floatArrayToSort, int low, int mid, int high) {
         floatArrayToSort[k] = b[j];
         k++;
     }
+    free(a); free(b);
 }
 
 void makeGathervCall(void* recvbuf, int rank, int processorCount, int portion,
@@ -411,9 +415,15 @@ void makeGathervCall(void* recvbuf, int rank, int processorCount, int portion,
                     NULL, NULL, MPI_FLOAT, 0, communicator);
     }
 }
+
+int cmpfunc (const void * a, const void * b) {
+    return ( *(int*)a - *(int*)b );
+}
+
+
 int main(int argc, char** argv) {
     MPI_Init(&argc, &argv);
-    int size = 25000;
+    int size = 10000000;
     float* array = (float*) malloc((size_t) size * sizeof(float));
     if (array == NULL) return -1;
 //    for (int i = 0; i < size; i++) {
@@ -429,16 +439,6 @@ int main(int argc, char** argv) {
     for (int i = 0; i < size; i++) {
         array[i] = (float) rand() / (float) RAND_MAX;
     }
-    double start, end;
-    start = MPI_Wtime();
-    if (!bucketsort(array, size, 8)) { // not main processor results
-        MPI_Finalize();
-        free(array);
-        return 0;
-    }
-    end = MPI_Wtime();
-    printf("Time taken: %f\n", end-start);
-    MPI_Finalize();
     int incorrectCounter, correctCounter;
     incorrectCounter = correctCounter = 0;
     for (int i = 1; i < size; i++) {
@@ -446,8 +446,31 @@ int main(int argc, char** argv) {
         else correctCounter++;
     }
     correctCounter++; // final unaccounted number
+    int unsorted = incorrectCounter;
+    int sorted = correctCounter;
+    double start, end;
+    start = MPI_Wtime();
+//    qsort(array, size, sizeof(float), cmpfunc);
+    if (!bucketsort(array, size, 8)) { // not main processor results
+        MPI_Finalize();
+        free(array);
+        return 0;
+    }
+    end = MPI_Wtime();
+    printf("Time taken: %f\n", end-start);
+    incorrectCounter = correctCounter = 0;
+    for (int i = 1; i < size; i++) {
+        if (array[i] < array[i-1]) incorrectCounter++;
+        else correctCounter++;
+    }
+    correctCounter++; // final unaccounted number
+//    printf("Initially sorted numbers: %d\nIncorrectly sorted numbers: %d\nTotal numbers: %d\n",
+//           sorted, unsorted, size);
     printf("Sorted numbers: %d\nIncorrectly sorted numbers: %d\nTotal numbers: %d\n",
            correctCounter, incorrectCounter, size);
     free(array);
+    FILE *f = fopen("times.txt", "a");
+    fprintf(f, "%g,", end-start);
+    MPI_Finalize();
     return 0;
 }
