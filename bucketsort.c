@@ -31,7 +31,7 @@ void makeGathervCall(void* recvbuf, int rank, int processorCount, int portion,
 
 
 int bucketsort(float* floatArrayToSort, int size, int itemsPerProcessor) {
-    return bucketsort_parallel(floatArrayToSort, size, 10000, itemsPerProcessor);
+    return bucketsort_parallel(floatArrayToSort, size, 20, itemsPerProcessor);
 }
 
 int bucketsort_parallel(float* floatArrayToSort, int size,
@@ -244,8 +244,6 @@ void freeBuckets(struct Bucket* buckets, int bucketCount) {
 int fillBuckets(const float* floatArrayToSort, int size, struct Bucket* buckets, int bucketCount) {
     float currentItem;
     struct Bucket *bucket;
-    int rank;
-    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
 
     // Fill the buckets
     for (int i = 0; i < size; i++) {
@@ -257,7 +255,7 @@ int fillBuckets(const float* floatArrayToSort, int size, struct Bucket* buckets,
         }
         // ASSUMES NUMBERS WILL BE FROM 0 TO 1. EXPLAIN IN DISS - OVERVIEW OF ALGORITHM. IF NUMBERS ABOVE 1, PERFORMANCE = BAD.
         if (currentItem < 0.9) {
-            bucket = &(buckets[(int) (currentItem * (float) bucketCount)]); // 0.004, 0.00455, 0.15, 0.015
+            bucket = &(buckets[(int) (currentItem * (float) bucketCount)]);
         } else { // If larger than limit, store in the final bucket
             bucket = &buckets[bucketCount-1];
         }
@@ -267,17 +265,18 @@ int fillBuckets(const float* floatArrayToSort, int size, struct Bucket* buckets,
             continue;
         }
 
-        // Insert element at the start.
+        // Insert element at the start
         struct Bucket *newBucket = (struct Bucket *) malloc(sizeof(struct Bucket));
         if (newBucket == NULL) {
             freeBuckets(buckets, bucketCount);
             MPI_Abort(MPI_COMM_WORLD, EXIT_FAILURE);
             return 0;
         }
-        newBucket->value = currentItem;
-        newBucket->count = 1;
         newBucket->next = bucket->next;
         bucket->next = newBucket;
+
+        newBucket->value = currentItem;
+        newBucket->count = 1;
     }
     return 1;
 }
@@ -423,7 +422,7 @@ int cmpfunc (const void * a, const void * b) {
 
 int main(int argc, char** argv) {
     MPI_Init(&argc, &argv);
-    int size = 10000000;
+    int size = 5000000;
     float* array = (float*) malloc((size_t) size * sizeof(float));
     if (array == NULL) return -1;
 //    for (int i = 0; i < size; i++) {
