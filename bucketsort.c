@@ -22,12 +22,10 @@ void getDistributions(int *start, int *portion, int *remainder, int size,
 void initialiseBuckets(struct Bucket* buckets, int bucketCount);
 int fillBuckets(const float* floatArrayToSort, int size,
                  struct Bucket* buckets, int bucketCount);
-void printBuckets(struct Bucket* buckets, int bucketCount);
+void freeBuckets(struct Bucket* buckets, int bucketCount);
 void mergesort_parallel(float* floatArrayToSort, int size, MPI_Comm communicator);
 void mergesort(float* array, int low, int high);
 void merge(float* floatArrayToSort, int low, int mid, int high);
-void makeGathervCall(void* recvbuf, int rank, int processorCount, int portion,
-                     int remainder, int size, MPI_Comm communicator);
 
 
 int bucketsort(float* floatArrayToSort, int size, int itemsPerProcessor) {
@@ -40,9 +38,9 @@ int bucketsort_parallel(float* floatArrayToSort, int size,
      * @param floatArrayToSort  Array to sort, self-descriptive
      * @param size              Size of the array to sort
      * @param bucketCount       Number of buckets
-     * @param itemsPerProcessor {bucketCount} additional processors allowed for every ..-
-     *                          -.. extra {itemsPerProcessor} items in every bucket ..-
-     *                          -.. to allow parallel mergesort.
+     * @param itemsPerProcessor {bucketCount} additional processors allowed for ..-
+     *                          -.. every extra {itemsPerProcessor} items in ..-
+     *                          -.. every bucket (avg) to allow parallel mergesort.
      */
     if (bucketCount < 1) return 0;
 
@@ -57,61 +55,46 @@ int bucketsort_parallel(float* floatArrayToSort, int size,
 
 
     // Ensure max 1 extra processor for each itemsPerProcessor in each bucket
-//    WORK ON THE EQUATION BELOW. ALSO BUCKETCOUNT IS 1. IT SHOULD BE 2 OR 10 TO TEST.
-    if (processorCount > (bucketCount +
-            size/(bucketCount*itemsPerProcessor))) {
+    if (processorCount > bucketCount + bucketCount * (size / bucketCount / itemsPerProcessor)) {
         if (!rank) {
             printf("Number of processors exceeds the allowed limit. There can be "
                    "one additional processor per bucket for every %d items (avg) "
                    "in each bucket.", itemsPerProcessor);
         }
+        MPI_Abort(MPI_COMM_WORLD, MPI_ERR_OP);
         return 0;
     }
 
     struct Bucket* buckets = (struct Bucket*) malloc((size_t) bucketCount * sizeof(struct Bucket));
     if (buckets == NULL) {
-        MPI_Abort(MPI_COMM_WORLD, EXIT_FAILURE);
+        MPI_Abort(MPI_COMM_WORLD, MPI_ERR_BUFFER);
+        printf("An error has occurred.");
         return 0;
     }
 
+    // Load distribution
     int portion, remainder, start, groupRank;
     groupRank = rank % bucketCount;
-
     getDistributions(&start, &portion, &remainder, bucketCount,
                      processorCount, groupRank);
 
+    // Initialise buckets
     initialiseBuckets(buckets, bucketCount);
 
     // negative numbers in list or failure to malloc
     if (!fillBuckets(floatArrayToSort, size, buckets, bucketCount)) {
+        MPI_Abort(MPI_COMM_WORLD, 9);
+        printf("An error has occurred.");
         return 0;
     }
-    /* testing if buckets have been initialised correctly
-     * if (!rank) {
-     *    struct Bucket* b;
-     *    float max[10] = {0}; // 10 = bucketCount
-     *    for (int i = 0; i < bucketCount; i++) {
-     *        b = &buckets[i];
-     *        while (b != NULL) {
-     *            if (b->value > max[i]) max[i] = b->value;
-     *            b = b->next;
-     *        }
-     *    }
-     *    for (int i = 1; i < 10; i++) {
-     *        if (max[i] <= max[i-1]) {
-     *            printf("i: %d, max[i]: %f, max[i-1]: %f\n");
-     *        }
-     *    }
-     *    return 1;
-     * }
-     * return 0;
-     */
+
     if (rank) { // Rank 0 keeps original array for to have space for final gather
         size_t newSize = portion * sizeof(struct Bucket);
         memcpy(buckets, buckets + start, newSize);
         buckets = (struct Bucket *) realloc(buckets, newSize);
         if (buckets == NULL) {
-            MPI_Abort(MPI_COMM_WORLD, EXIT_FAILURE);
+            MPI_Abort(MPI_COMM_WORLD, 1);
+            printf("An error has occurred.");
             return 0;
         }
     }
@@ -140,19 +123,28 @@ int bucketsort_parallel(float* floatArrayToSort, int size,
             // Freeing buckets here saves the need to use another loop to do so.
             free(prevBucket);
         }
+        // Sort bucket
         mergesort_parallel(numbersInBuckets[i], itemsInBucket, localCommunicator);
     }
-    free(buckets);
-
+    freeBuckets(buckets, portion);
     /* Total number of items sorted */
     int totalItems = 0;
-    // Auxillary processors only help with mergesort, thus don't run below
+    // Auxiliary processors only help with mergesort, thus don't run below
     if (rank < bucketCount) {
         for (int i = 0; i < portion; i++) {
             totalItems += sizes[i];
         }
     }
     float* sortedArray = malloc(totalItems * sizeof(float));
+    if (totalItems && !sortedArray) { // not auxiliary processor and failed malloc
+        for (int i = 0; i < portion; i++) {
+            free(numbersInBuckets[i]);
+        }
+        free(numbersInBuckets);
+        MPI_Abort(MPI_COMM_WORLD, 1);
+        printf("An error has occurred.");
+    }
+
     /* Add all sorted numbers into the allocated array */
     if (rank < bucketCount) {
         int k = 0;
@@ -167,6 +159,7 @@ int bucketsort_parallel(float* floatArrayToSort, int size,
         free(numbersInBuckets[i]);
     }
     free(numbersInBuckets);
+
     /* Find recvcounts and displs for final Gatherv */
     if (!rank) {
         int recvcounts[processorCount], displs[processorCount];
@@ -197,13 +190,6 @@ int bucketsort_parallel(float* floatArrayToSort, int size,
 //        }
 //    }
     return rank == 0;
-    /*
-     * Create new communicators for each bucket.
-     * This allows multiple processors to be run on each.
-     * Hence, allowing mergesort to be done in parallel on each bucket.
-     * The new communicators allow processor ranks to be local.
-     * This allows for rank based parallelism.
-     */
 }
 
 void getDistributions(int *start, int *portion, int *remainder, int size,
@@ -250,11 +236,10 @@ int fillBuckets(const float* floatArrayToSort, int size, struct Bucket* buckets,
         currentItem = floatArrayToSort[i];
         if (currentItem < 0) {
             freeBuckets(buckets, bucketCount);
-            MPI_Abort(MPI_COMM_WORLD, EXIT_FAILURE);
+            MPI_Abort(MPI_COMM_WORLD, 12);
             return 0; // No negative numbers allowed
         }
-        // ASSUMES NUMBERS WILL BE FROM 0 TO 1. EXPLAIN IN DISS - OVERVIEW OF ALGORITHM. IF NUMBERS ABOVE 1, PERFORMANCE = BAD.
-        if (currentItem < 0.9) {
+        if (currentItem < (float) (bucketCount - 1) / (float) bucketCount) {
             bucket = &(buckets[(int) (currentItem * (float) bucketCount)]);
         } else { // If larger than limit, store in the final bucket
             bucket = &buckets[bucketCount-1];
@@ -269,7 +254,7 @@ int fillBuckets(const float* floatArrayToSort, int size, struct Bucket* buckets,
         struct Bucket *newBucket = (struct Bucket *) malloc(sizeof(struct Bucket));
         if (newBucket == NULL) {
             freeBuckets(buckets, bucketCount);
-            MPI_Abort(MPI_COMM_WORLD, EXIT_FAILURE);
+            MPI_Abort(MPI_COMM_WORLD, 1);
             return 0;
         }
         newBucket->next = bucket->next;
@@ -293,8 +278,9 @@ void mergesort_parallel(float* floatArrayToSort, int size, MPI_Comm communicator
     getDistributions(&start, &portion, &remainder, size, processorCount, rank);
     float* sortedArray = malloc(portion * sizeof(float));
     memcpy(sortedArray, floatArrayToSort+start, portion*sizeof(float));
+    // Sort portion of array
     mergesort(sortedArray, 0, portion-1);
-    // POTENTIALLY REPLACE BELOW WITH MAKEGATHERVCALL() CALL
+
     if (!rank) { // Only rank 0 manages the global communications
         // Compute counts and displacements for MPI_Gatherv.
         int recvcounts[processorCount];
@@ -334,19 +320,19 @@ void mergesort_parallel(float* floatArrayToSort, int size, MPI_Comm communicator
                     NULL, NULL, MPI_FLOAT, 0, communicator);
     }
     free(sortedArray);
-//     mergesort(floatArrayToSort, 0, size-1);
 }
 void mergesort(float* array, int low, int high) {
+    // Ordinary mergesort
     if (low >= high) return;
-    int mid = low + (high - low)/2; // 0 2     0 + (2 - 0)/2 = 1   0 1 2
-    mergesort(array, low, mid); // low -> mid inclusive
+    int mid = low + (high - low)/2;
+    mergesort(array, low, mid);
     mergesort(array, mid + 1, high);
     merge(array, low, mid, high);
 }
 
 void merge(float* floatArrayToSort, int low, int mid, int high) {
     int i, j, k;
-    int lengthOfA = mid - low + 1; // low -> mid, inclusive
+    int lengthOfA = mid - low + 1;
     int lengthOfB = high - mid;
     float* a = malloc(lengthOfA * sizeof(float));
     float* b = malloc(lengthOfB * sizeof(float));
@@ -381,58 +367,12 @@ void merge(float* floatArrayToSort, int low, int mid, int high) {
     free(a); free(b);
 }
 
-void makeGathervCall(void* recvbuf, int rank, int processorCount, int portion,
-                     int remainder, int size, MPI_Comm communicator) {
-    // LITERALLY NOT USED.
-    if (!rank) { // Only rank 0 manages the global communications
-        // Compute counts and displacements for MPI_Gatherv.
-        int recvcounts[processorCount];
-        int gatherDispls[processorCount]; // Displacement for MPI_Gatherv
-        // rank 0 always accounts for remainder
-        int valuesWithRemainder = portion;
-        int valuesWithoutRemainder = remainder ?
-                                     portion-1 : valuesWithRemainder;
-
-        int currGatherDispls = 0; // Start at 0
-        // Processes dealing with remainders have additional counts and displs
-        for (int i = 0; i < remainder; i++) {
-            gatherDispls[i] = currGatherDispls;
-            recvcounts[i] = valuesWithRemainder;
-            currGatherDispls += valuesWithRemainder;
-        }
-        for (int i = remainder; i < processorCount; i++) {
-            gatherDispls[i] = currGatherDispls;
-            recvcounts[i] = valuesWithoutRemainder;
-            currGatherDispls += valuesWithoutRemainder;
-        }
-        MPI_Gatherv(MPI_IN_PLACE, portion, MPI_FLOAT, recvbuf,
-                    recvcounts, gatherDispls, MPI_FLOAT, 0, communicator);
-
-    }
-    else {
-        MPI_Gatherv(recvbuf, portion, MPI_FLOAT, NULL,
-                    NULL, NULL, MPI_FLOAT, 0, communicator);
-    }
-}
-
-int cmpfunc (const void * a, const void * b) {
-    return ( *(int*)a - *(int*)b );
-}
-
 
 int main(int argc, char** argv) {
     MPI_Init(&argc, &argv);
-    int size = 5000000;
+    int size = 1000000;
     float* array = (float*) malloc((size_t) size * sizeof(float));
     if (array == NULL) return -1;
-//    for (int i = 0; i < size; i++) {
-//        array[i] = (float) i / 10;
-//    }
-//    array[1] = 0.21; array[2] = 0.2;
-//    array[13] = 1.4; array[14] = 1.3;
-//    for (int i = 15; i < size; i++) {
-//        array[39-i] = 0.1 + 0.001*i;
-//    }
     time_t t;
     srand((unsigned) time(&t));
     for (int i = 0; i < size; i++) {
@@ -449,7 +389,6 @@ int main(int argc, char** argv) {
     int sorted = correctCounter;
     double start, end;
     start = MPI_Wtime();
-//    qsort(array, size, sizeof(float), cmpfunc);
     if (!bucketsort(array, size, 8)) { // not main processor results
         MPI_Finalize();
         free(array);
