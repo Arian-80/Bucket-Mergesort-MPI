@@ -126,7 +126,7 @@ int bucketsort_parallel(float* floatArrayToSort, int size,
         // Sort bucket
         mergesort_parallel(numbersInBuckets[i], itemsInBucket, localCommunicator);
     }
-    freeBuckets(buckets, portion);
+    free(buckets);
     /* Total number of items sorted */
     int totalItems = 0;
     // Auxiliary processors only help with mergesort, thus don't run below
